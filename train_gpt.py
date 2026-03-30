@@ -48,6 +48,7 @@ class Hyperparameters:
     # Validation cadence and batch size. Validation always uses the full fineweb_val split.
     val_batch_size = int(os.environ.get("VAL_BATCH_SIZE", 524_288))
     val_loss_every = int(os.environ.get("VAL_LOSS_EVERY", 1000))
+    val_max_tokens = int(os.environ.get("VAL_MAX_TOKENS", "0"))
     train_log_every = int(os.environ.get("TRAIN_LOG_EVERY", 200))
 
     # Training length.
@@ -214,6 +215,15 @@ def load_validation_tokens(pattern: str, seq_len: int) -> Tensor:
     usable = ((tokens.numel() - 1) // seq_len) * seq_len
     if usable <= 0:
         raise ValueError(f"Validation split is too short for TRAIN_SEQ_LEN={seq_len}")
+    return tokens[: usable + 1]
+
+
+def maybe_trim_validation_tokens(tokens: Tensor, seq_len: int, max_tokens: int) -> Tensor:
+    if max_tokens <= 0:
+        return tokens
+    usable = min(((max_tokens // seq_len) * seq_len), tokens.numel() - 1)
+    if usable <= 0:
+        raise ValueError(f"VAL_MAX_TOKENS={max_tokens} is too small for TRAIN_SEQ_LEN={seq_len}")
     return tokens[: usable + 1]
 
 def eval_val(
@@ -812,13 +822,19 @@ def main() -> None:
         )
     dataset_dir = Path(args.data_path).resolve()
     actual_train_files = len(list(dataset_dir.glob("fineweb_train_*.bin")))
-    val_tokens = load_validation_tokens(args.val_files, args.train_seq_len)
+    val_tokens = maybe_trim_validation_tokens(
+        load_validation_tokens(args.val_files, args.train_seq_len),
+        args.train_seq_len,
+        args.val_max_tokens,
+    )
     base_bytes_lut, has_leading_space_lut, is_boundary_token_lut = build_sentencepiece_luts(
         sp, args.vocab_size, device
     )
     log0(f"val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path={args.tokenizer_path}")
     log0(f"train_loader:dataset:{dataset_dir.name} train_shards:{actual_train_files}")
     log0(f"val_loader:shards pattern={args.val_files} tokens:{val_tokens.numel() - 1}")
+    if args.val_max_tokens > 0:
+        log0(f"val_loader:trimmed_tokens:{val_tokens.numel() - 1} requested_max_tokens:{args.val_max_tokens}")
     # -----------------------------
     # MODEL + OPTIMIZER SETUP
     # -----------------------------
